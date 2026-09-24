@@ -30,6 +30,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
+import java.net.URLDecoder;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
@@ -139,17 +141,29 @@ public class HttpClientHelper {
     }
 
     private String resolveFileName(String disposition, String url) {
+        String fileName = null;
+        String extendedFileName = null;
         if (disposition != null) {
             String[] parts = disposition.split(";");
             for (String part : parts) {
                 String trimmed = part.trim();
-                if (trimmed.startsWith("filename=")) {
-                    String raw = trimmed.substring("filename=".length()).trim();
-                    if (raw.startsWith("\"") && raw.endsWith("\"") && raw.length() > 1) {
-                        raw = raw.substring(1, raw.length() - 1);
-                    }
-                    return decode(raw);
+                int separator = trimmed.indexOf('=');
+                if (separator <= 0) {
+                    continue;
                 }
+                String parameterName = trimmed.substring(0, separator).trim();
+                String raw = stripQuotes(trimmed.substring(separator + 1).trim());
+                if ("filename*".equalsIgnoreCase(parameterName)) {
+                    extendedFileName = decodeExtendedFileName(raw);
+                } else if ("filename".equalsIgnoreCase(parameterName)) {
+                    fileName = decodePercentEncoded(raw);
+                }
+            }
+            if (extendedFileName != null) {
+                return extendedFileName;
+            }
+            if (fileName != null) {
+                return fileName;
             }
         }
         try {
@@ -159,15 +173,38 @@ public class HttpClientHelper {
                 return null;
             }
             int idx = path.lastIndexOf('/');
-            return idx >= 0 ? path.substring(idx + 1) : path;
+            String pathFileName = idx >= 0 ? path.substring(idx + 1) : path;
+            return decodePercentEncoded(pathFileName);
         } catch (Exception e) {
             return null;
         }
     }
 
-    private String decode(String value) {
+    private String decodeExtendedFileName(String value) {
+        int charsetSeparator = value.indexOf('\'');
+        int languageSeparator = value.indexOf('\'', charsetSeparator + 1);
+        if (charsetSeparator <= 0 || languageSeparator < 0) {
+            return null;
+        }
         try {
-            return java.net.URLDecoder.decode(value, StandardCharsets.UTF_8);
+            Charset charset = Charset.forName(value.substring(0, charsetSeparator));
+            String encodedFileName = value.substring(languageSeparator + 1);
+            return URLDecoder.decode(encodedFileName.replace("+", "%2B"), charset);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private String stripQuotes(String value) {
+        if (value.startsWith("\"") && value.endsWith("\"") && value.length() > 1) {
+            return value.substring(1, value.length() - 1);
+        }
+        return value;
+    }
+
+    private String decodePercentEncoded(String value) {
+        try {
+            return URLDecoder.decode(value.replace("+", "%2B"), StandardCharsets.UTF_8);
         } catch (Exception e) {
             return value;
         }
