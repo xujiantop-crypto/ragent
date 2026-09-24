@@ -153,7 +153,7 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
         StoredFileDTO stored = resolveStoredFile(kbDO.getCollectionName(), sourceType, requestParam.getSourceLocation(), file);
         // 前置拦截：与分块阶段同一套 MIME 路由，无解析器的类型直接拒绝，不落库不发 MQ
         if (!parserRegistry.canParse(stored.getMimeType())) {
-            fileStorageService.deleteByUrl(stored.getUrl());
+            deleteStoredFileQuietly(null, stored.getUrl());
             throw new ClientException("暂不支持的文件类型：" + stored.getDetectedType());
         }
 
@@ -177,7 +177,7 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
                 .createdBy(UserContext.getUsername())
                 .updatedBy(UserContext.getUsername())
                 .build();
-        documentMapper.insert(documentDO);
+        persistDocument(documentDO, stored);
         bizChangeLogContext.put(String.valueOf(documentDO.getId()), null, documentDO);
         bizChangeLogContext.putName(documentDO.getDocName());
 
@@ -826,6 +826,34 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
         return remoteFileFetcher.fetchAndStore(bucketName, sourceLocation);
     }
 
+    private void persistDocument(KnowledgeDocumentDO documentDO, StoredFileDTO stored) {
+        final int inserted;
+        try {
+            inserted = documentMapper.insert(documentDO);
+        } catch (RuntimeException insertFailure) {
+            if (isDocumentConfirmedAbsent(documentDO.getId(), stored.getUrl())) {
+                deleteStoredFileQuietly(documentDO.getId(), stored.getUrl());
+            }
+            throw insertFailure;
+        }
+        if (inserted <= 0) {
+            deleteStoredFileQuietly(documentDO.getId(), stored.getUrl());
+            throw new ServiceException("文档记录保存失败");
+        }
+    }
+
+    private boolean isDocumentConfirmedAbsent(String docId, String fileUrl) {
+        if (!StringUtils.hasText(docId)) {
+            log.warn("文档记录写入失败且未生成文档 ID，无法确认落库状态，保留存储文件, fileUrl={}", fileUrl);
+            return false;
+        }
+        try {
+            return documentMapper.selectById(docId) == null;
+        } catch (RuntimeException verifyFailure) {
+            log.warn("文档记录写入失败后无法确认落库状态，保留存储文件, docId={}, fileUrl={}", docId, fileUrl, verifyFailure);
+            return false;
+        }
+    }
 
     @Override
     public String preview(String docId) {
@@ -847,10 +875,17 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
         if (documentDO == null || !StringUtils.hasText(documentDO.getFileUrl())) {
             return;
         }
+        deleteStoredFileQuietly(documentDO.getId(), documentDO.getFileUrl());
+    }
+
+    private void deleteStoredFileQuietly(String docId, String fileUrl) {
+        if (!StringUtils.hasText(fileUrl)) {
+            return;
+        }
         try {
-            fileStorageService.deleteByUrl(documentDO.getFileUrl());
+            fileStorageService.deleteByUrl(fileUrl);
         } catch (Exception e) {
-            log.warn("删除文档存储文件失败, docId={}, fileUrl={}", documentDO.getId(), documentDO.getFileUrl(), e);
+            log.warn("删除文档存储文件失败, docId={}, fileUrl={}", docId, fileUrl, e);
         }
     }
 }
